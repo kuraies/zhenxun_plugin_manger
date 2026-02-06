@@ -15,7 +15,10 @@ from nonebot_plugin_alconna import Alconna, Args, on_alconna, Option, UniMessage
 __plugin_meta__ = PluginMetadata(
     name="插件管理",
     description="对插件进行管理",
-    usage="{插件用法}",
+    usage=""
+          "{插件用法}"
+          ""
+          "不要卸载使用了fastapi的插件！！！",
 
     extra=PluginExtraData(
         author="Uesugi Hanako",
@@ -66,7 +69,6 @@ plugin_manager = on_alconna(
 )
 
 
-
 @plugin_manager.assign("列表")
 async def plugin_list_handle():
    img = await PluginManger.plugin_list()
@@ -95,7 +97,7 @@ async def plugin_load_handle(args:CommandResult):
         return
 
 
-    result = PluginManger.plugin_load(plugin_path)
+    result = await PluginManger.plugin_load(plugin_path)
     if result=="SUCCESS":
         await UniMessage(f"插件 {plugin_path} 加载成功").send(reply_to=True)
     elif result=="EXIST":
@@ -128,7 +130,7 @@ async def plugin_unload_handle(args:CommandResult):
         await UniMessage(f"未找到指定的插件").send(reply_to=True)
         return
 
-    result = await PluginManger.plugin_unload(_plugin.module)
+    result = await PluginManger.plugin_unload(_plugin)
 
     # 处理卸载结果
     response_messages = {

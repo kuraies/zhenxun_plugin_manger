@@ -1,6 +1,7 @@
 import ast
 import importlib
 import sys
+import traceback
 from pathlib import Path
 from typing import Optional, List, Any, Dict
 
@@ -14,7 +15,10 @@ from zhenxun.utils.message import MessageUtils
 
 
 class PluginManger:
-    plugin_root: Path = Path("zhenxun/plugins").resolve()
+    plugin_roots: List[Path] = [
+        Path("zhenxun/plugins").resolve(),
+        Path("zhenxun/builtin_plugins").resolve()
+    ]
     unload_plugin_list: List[Dict[str, Optional[str]]] = []
     _next_id: int = 1
 
@@ -57,7 +61,7 @@ class PluginManger:
         return pic
 
     @classmethod
-    def plugin_load(cls, plugin_path: str) -> str:
+    async def plugin_load(cls, plugin_path: str) -> str:
         if plugin_path is None:
             return "ERROR"
 
@@ -67,19 +71,17 @@ class PluginManger:
                 return "EXIST"
 
         try:
-            load_plugin(plugin_path)  # 尝试加载插件
 
-            # 加载成功后，从 unload_plugin_list 中移除对应插件
-            cls.unload_plugin_list = [
-                p for p in cls.unload_plugin_list if p.get("module_path") != plugin_path
-            ]
+
+            load_plugin(plugin_path)
+            await cls.get_noload_plugins()
 
             return "SUCCESS"
         except Exception:
             return "LOAD_ERROR"
 
     @classmethod
-    async def plugin_unload(cls, plugin_name: str) -> str:
+    async def plugin_unload(cls, plugin: PluginInfo) -> str:
         """
         卸载插件，返回状态码：
             "NOT_FOUND"   - 插件在 _plugins 中不存在
@@ -87,6 +89,8 @@ class PluginManger:
             "SUCCESS"     - 卸载成功
             "ERROR"       - 卸载时异常
         """
+
+        plugin_name = plugin.module
         if plugin_name not in _plugins:
             return "NOT_FOUND"
 
@@ -115,6 +119,7 @@ class PluginManger:
 
             # 清理缓存
             importlib.invalidate_caches()
+            await plugin.delete()
             await cls.get_noload_plugins()
             return "SUCCESS"
         except Exception:
@@ -145,50 +150,58 @@ class PluginManger:
 
     @classmethod
     async def get_noload_plugins(cls) -> List[Dict[str, Optional[str]]]:
-        if not cls.plugin_root.exists():
-            return []
-
-        loaded_modules = {name for name in sys.modules if name.startswith("zhenxun.plugins.")}
         results: List[Dict[str, Optional[str]]] = []
 
-        for item in cls.plugin_root.iterdir():
-            if item.name.startswith("_"):
+        loaded_modules = {name for name in sys.modules if name.startswith("zhenxun.plugins.") or name.startswith("zhenxun.builtin_plugins.")}
+
+        for root in cls.plugin_roots:
+            if not root.exists():
                 continue
 
-            if item.is_file() and item.suffix == ".py":
-                plugin_file = item
-                module_name = item.stem
-            elif item.is_dir() and (item / "__init__.py").exists():
-                plugin_file = item / "__init__.py"
-                module_name = item.name
-            else:
-                continue
+            for item in root.iterdir():
+                if item.name.startswith("_"):
+                    continue
 
-            module_path = f"zhenxun.plugins.{module_name}"
-            if module_path in loaded_modules:
-                continue
+                if item.is_file() and item.suffix == ".py":
+                    plugin_file = item
+                    module_name = item.stem
+                elif item.is_dir() and (item / "__init__.py").exists():
+                    plugin_file = item / "__init__.py"
+                    module_name = item.name
+                else:
+                    continue
 
-            meta_name = meta_description = None
-            try:
-                source = plugin_file.read_text(encoding="utf-8")
-                meta = cls.parse_plugin_metadata(source)
-                meta_name = meta.get("name")
-                meta_description = meta.get("description")
-            except Exception:
-                pass
+                # 根据不同根目录生成模块路径
+                if root.name == "plugins":
+                    module_path = f"zhenxun.plugins.{module_name}"
+                else:  # builtin_plugins
+                    module_path = f"zhenxun.builtin_plugins.{module_name}"
 
-            plugin_id = cls._next_id
-            cls._next_id += 1
+                if module_path in loaded_modules:
+                    continue
 
-            results.append({
-                "id": plugin_id,
-                "module": module_name,
-                "name": meta_name,
-                "module_path": module_path,
-                "description": meta_description,
-            })
-            cls.unload_plugin_list=results
+                meta_name = meta_description = None
+                try:
+                    source = plugin_file.read_text(encoding="utf-8")
+                    meta = cls.parse_plugin_metadata(source)
+                    meta_name = meta.get("name")
+                    meta_description = meta.get("description")
+                except Exception:
+                    pass
 
+                plugin_id = cls._next_id
+                cls._next_id += 1
+
+                results.append({
+                    "id": plugin_id,
+                    "module": module_name,
+                    "name": meta_name,
+                    "module_path": module_path,
+                    "description": meta_description,
+                })
+
+        # 更新 unload_plugin_list
+        cls.unload_plugin_list = results
         return results
 
     @staticmethod
