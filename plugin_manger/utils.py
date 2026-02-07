@@ -3,28 +3,85 @@ import importlib
 import sys
 import traceback
 from pathlib import Path
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Callable,Union
+
+from dataclasses import dataclass,field
 
 from nonebot.matcher import matchers
-from nonebot.plugin import load_plugin, _plugins, _managers
+from nonebot.plugin import load_plugin, _plugins, _managers, PluginMetadata
 
 from zhenxun.builtin_plugins.admin.plugin_switch._data_source import plugin_row_style
+from zhenxun.configs.utils import PluginExtraData, PluginSetting
 from zhenxun.models.plugin_info import PluginInfo
 from zhenxun.utils._image_template import ImageTemplate
 from zhenxun.utils.message import MessageUtils
+from zhenxun.configs.config import Config
+from zhenxun.utils.enum import (
+    PluginType,
+)
+
+
+@dataclass(frozen=True)
+class PluginSource:
+    name: str
+    path: Path
+    enabled: Callable[[], bool]
+
+    @property
+    def module_prefix(self) -> str:
+        """
+        根据插件源路径推导 Python 模块前缀
+        前提：path 指向的是一个 Python package 目录
+        """
+        return ".".join(self.path.parts)
+
 
 
 class PluginManger:
-    plugin_roots: List[Path] = [
-        Path("zhenxun/plugins").resolve(),
-        Path("zhenxun/builtin_plugins").resolve()
-    ]
+
+    PROJECT_ROOT = Path("zhenxun")
+
     unload_plugin_list: List[Dict[str, Optional[str]]] = []
     _next_id: int = 1
+
+    PLUGIN_SOURCES: List[PluginSource] = [
+        PluginSource(
+            name="user",
+            path=Path("zhenxun/plugins"),
+            enabled= lambda:True,
+        ),
+        PluginSource(
+            name="builtin",
+            path=Path("zhenxun/builtin_plugins"),
+            enabled=lambda: Config.get_config("plugin_manger", "developer-mode"),
+        ),
+    ]
 
     @classmethod
     async def plugin_list(cls):
         plugin_lists = await PluginInfo.get_plugins()
+
+        # 获取所有启用的插件源的 module_prefix
+        enabled_prefixes = []
+        for source in cls.PLUGIN_SOURCES:
+            try:
+                if source.enabled():
+                    enabled_prefixes.append(source.module_prefix)
+            except Exception:
+                # 如果 enabled() 调用失败，跳过该插件源
+                continue
+        print(enabled_prefixes)
+        print("config:",Config.get_config("plugin_manger", "developer-mode"))
+        # 筛选插件：只显示来自已启用插件源的插件
+        filtered_plugins = []
+        for plugin in plugin_lists:
+            if hasattr(plugin, 'module_path') and plugin.module_path:
+                plugin_path_str = str(plugin.module_path)
+                # 检查插件路径是否在任一已启用的插件源路径下
+                for source_path in enabled_prefixes:
+                    if source_path in plugin_path_str:
+                        filtered_plugins.append(plugin)
+                        break
 
         column_name = [
             "ID",
@@ -48,7 +105,7 @@ class PluginManger:
                 plugin.author,
                 plugin.version,
             ]
-            for plugin in plugin_lists
+            for plugin in filtered_plugins  # 使用筛选后的插件列表
         ]
 
         pic = await ImageTemplate.table_page(
@@ -73,7 +130,43 @@ class PluginManger:
         try:
 
 
-            load_plugin(plugin_path)
+            plugin=load_plugin(plugin_path)
+
+            metadata = plugin.metadata
+            if not metadata:
+                if not plugin.sub_plugins:
+                    return
+                """父插件"""
+                metadata = PluginMetadata(name=plugin.name, description="", usage="")
+            extra = metadata.extra
+            extra_data = PluginExtraData(**extra)
+            setting = extra_data.setting or PluginSetting()
+            if metadata.type == "library":
+                extra_data.plugin_type = PluginType.HIDDEN
+            if extra_data.plugin_type == PluginType.HIDDEN:
+                extra_data.menu_type = ""
+            if plugin.sub_plugins:
+                extra_data.plugin_type = PluginType.PARENT
+
+            await PluginInfo(
+                module=plugin.name,
+                module_path=plugin.module_name,
+                name=metadata.name,
+                author=extra_data.author,
+                version=extra_data.version,
+                level=setting.level,
+                default_status=setting.default_status,
+                limit_superuser=setting.limit_superuser,
+                menu_type=extra_data.menu_type,
+                cost_gold=setting.cost_gold,
+                plugin_type=extra_data.plugin_type,
+                admin_level=extra_data.admin_level,
+                is_show=extra_data.is_show,
+                ignore_prompt=extra_data.ignore_prompt,
+                parent=(plugin.parent_plugin.module_name if plugin.parent_plugin else None),
+                impression=setting.impression,
+            ).save()
+
             await cls.get_noload_plugins()
 
             return "SUCCESS"
@@ -108,18 +201,23 @@ class PluginManger:
                 if not matchers[priority]:
                     del matchers[priority]
 
-            # 删除 sys.modules 中插件模块及其子模块
-            to_delete = [mod for mod in list(sys.modules) if module_name in mod]
-            for mod in to_delete:
-                del sys.modules[mod]
+
+            await plugin.delete()
 
             # 删除插件记录
             del _plugins[plugin_name]
             _managers[:] = [m for m in _managers if plugin_name not in m.available_plugins]
 
+
+            # 删除 sys.modules 中插件模块及其子模块
+            to_delete = [mod for mod in list(sys.modules) if module_name in mod]
+            for mod in to_delete:
+                del sys.modules[mod]
+
+
             # 清理缓存
             importlib.invalidate_caches()
-            await plugin.delete()
+
             await cls.get_noload_plugins()
             return "SUCCESS"
         except Exception:
@@ -148,15 +246,36 @@ class PluginManger:
         )
         return pic
 
+
+    @classmethod
+    def get_enabled_sources(cls) -> List[PluginSource]:
+        return [s for s in cls.PLUGIN_SOURCES if s.enabled()]
+
+    @classmethod
+    def get_loaded_modules(cls) -> set[str]:
+        prefixes = tuple(
+            src.module_prefix + "."
+            for src in cls.get_enabled_sources()
+        )
+
+        return {
+            name
+            for name in sys.modules
+            if name.startswith(prefixes)
+        }
+
     @classmethod
     async def get_noload_plugins(cls) -> List[Dict[str, Optional[str]]]:
         results: List[Dict[str, Optional[str]]] = []
 
-        loaded_modules = {name for name in sys.modules if name.startswith("zhenxun.plugins.") or name.startswith("zhenxun.builtin_plugins.")}
+        loaded_modules = cls.get_loaded_modules()
 
-        for root in cls.plugin_roots:
+        for source in cls.get_enabled_sources():
+            root = source.path
             if not root.exists():
                 continue
+
+            module_prefix = source.module_prefix
 
             for item in root.iterdir():
                 if item.name.startswith("_"):
@@ -171,19 +290,15 @@ class PluginManger:
                 else:
                     continue
 
-                # 根据不同根目录生成模块路径
-                if root.name == "plugins":
-                    module_path = f"zhenxun.plugins.{module_name}"
-                else:  # builtin_plugins
-                    module_path = f"zhenxun.builtin_plugins.{module_name}"
+                module_path = f"{module_prefix}.{module_name}"
 
                 if module_path in loaded_modules:
                     continue
 
                 meta_name = meta_description = None
                 try:
-                    source = plugin_file.read_text(encoding="utf-8")
-                    meta = cls.parse_plugin_metadata(source)
+                    source_code = plugin_file.read_text(encoding="utf-8")
+                    meta = cls.parse_plugin_metadata(source_code)
                     meta_name = meta.get("name")
                     meta_description = meta.get("description")
                 except Exception:
@@ -192,15 +307,17 @@ class PluginManger:
                 plugin_id = cls._next_id
                 cls._next_id += 1
 
-                results.append({
-                    "id": plugin_id,
-                    "module": module_name,
-                    "name": meta_name,
-                    "module_path": module_path,
-                    "description": meta_description,
-                })
+                results.append(
+                    {
+                        "id": plugin_id,
+                        "source": source.name,
+                        "module": module_name,
+                        "module_path": module_path,
+                        "name": meta_name,
+                        "description": meta_description,
+                    }
+                )
 
-        # 更新 unload_plugin_list
         cls.unload_plugin_list = results
         return results
 
@@ -252,3 +369,21 @@ class PluginManger:
             elif _type == "path" and plugin.get("module_path") == _value:
                 return plugin.get("module_path")
         return None
+
+
+
+def get_target_plugin(all_args: dict) -> tuple[str | None, str]:
+    plugin = all_args.get("plugin")
+    plugin_id = all_args.get("id")
+    plugin_path = all_args.get("path")
+
+    if plugin:
+        return plugin, "name"
+
+    for key in all_args:
+        if key == "id" and plugin_id:
+            return str(plugin_id), "id"
+        if key == "path" and plugin_path:
+            return str(plugin_path), "path"
+
+    return None, ""

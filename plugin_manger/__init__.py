@@ -1,13 +1,14 @@
 
 from zhenxun.models.plugin_info import PluginInfo
-from .utils import PluginManger
+from .utils import PluginManger, get_target_plugin
 
 from nonebot.plugin import PluginMetadata,  get_loaded_plugins
 from nonebot.permission import SUPERUSER
 
 
-from zhenxun.configs.utils import PluginExtraData
+from zhenxun.configs.utils import PluginExtraData, RegisterConfig
 from zhenxun.utils.enum import PluginType
+from zhenxun.utils.message import MessageUtils
 
 from nonebot_plugin_alconna import Alconna, Args, on_alconna, Option, UniMessage, Subcommand, Query, CommandResult, \
     Match
@@ -15,33 +16,39 @@ from nonebot_plugin_alconna import Alconna, Args, on_alconna, Option, UniMessage
 __plugin_meta__ = PluginMetadata(
     name="插件管理",
     description="对插件进行管理",
-    usage=""
-          "{插件用法}"
-          ""
-          "不要卸载使用了fastapi的插件！！！",
+    usage="""
+    插件管理，可以对插件进行加载、卸载、重载
+    用法：
+        查服 [ip]:[端口] / 查服 [ip]
+        设置语言 zh-cn
+        当前语言
+        语言列表
+        插件管理 列表
+        插件管理 未加载插件
+        插件管理 加载 [name?] [-D ]
+    
+    tip:
+        仅支持zhenxun文件夹下的插件目录
+    """.strip(),
 
     extra=PluginExtraData(
         author="Uesugi Hanako",
         version="0.1",
-
-        plugin_type=PluginType.SUPERUSER,
+        configs=[
+            RegisterConfig(
+                module="plugin_manger",
+                key="developer-mode",
+                value=False,
+                help="开发者模式(开启允许操作builtin_plugins)",
+                type=bool,
+                default_value=False,
+            ),
+            ],
+        plugin_type=PluginType("SUPERUSER"),
     ).to_dict(),
 )
 
-from zhenxun.utils.message import MessageUtils
 
-# plugin_manager = on_alconna(
-#     Alconna("插件管理",
-#             Subcommand("列表"),
-#             Subcommand("未加载插件"),
-#             Subcommand("加载",Args["plugin"]),
-#             Subcommand("卸载",Args["plugin_name",str]),
-#             Subcommand("重载",Args["plugin_name",str]),
-#             ),
-#     permission=SUPERUSER,
-#     priority=5,
-#     block=True,
-# )
 
 plugin_manager = on_alconna(
     Alconna("插件管理",
@@ -124,6 +131,7 @@ async def plugin_unload_handle(args:CommandResult):
         return
 
     field, value = query_methods[_type]
+
     _plugin = await PluginInfo.get_plugin(**{field: value})
 
     if _plugin is None:
@@ -142,20 +150,3 @@ async def plugin_unload_handle(args:CommandResult):
     message = response_messages.get(result, f"未找到插件 {_plugin.name}")
     await UniMessage(message).send(reply_to=True)
 
-
-def get_target_plugin(all_args: dict) -> tuple[str | None, str]:
-    plugin = all_args.get("plugin")
-    plugin_id = all_args.get("id")
-    plugin_path = all_args.get("path")
-
-    if plugin:
-        return plugin, "name"
-
-    for key in all_args:
-        if key == "id" and plugin_id:
-            return str(plugin_id), "id"
-        if key == "path" and plugin_path:
-            return str(plugin_path), "path"
-
-    # 都没值
-    return None, ""
