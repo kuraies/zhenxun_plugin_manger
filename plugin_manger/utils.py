@@ -1,24 +1,22 @@
 import ast
 import importlib
 import sys
-import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Any, Dict, Callable,Union
-
-from dataclasses import dataclass,field
+from typing import Optional, List, Any, Dict, Callable
 
 from nonebot.matcher import matchers
 from nonebot.plugin import load_plugin, _plugins, _managers, PluginMetadata
 
 from zhenxun.builtin_plugins.admin.plugin_switch._data_source import plugin_row_style
+from zhenxun.configs.config import Config
 from zhenxun.configs.utils import PluginExtraData, PluginSetting
 from zhenxun.models.plugin_info import PluginInfo
 from zhenxun.utils._image_template import ImageTemplate
-from zhenxun.utils.message import MessageUtils
-from zhenxun.configs.config import Config
 from zhenxun.utils.enum import (
     PluginType,
 )
+from zhenxun.utils.message import MessageUtils
 
 
 @dataclass(frozen=True)
@@ -201,9 +199,6 @@ class PluginManger:
                 if not matchers[priority]:
                     del matchers[priority]
 
-
-            await plugin.delete()
-
             # 删除插件记录
             del _plugins[plugin_name]
             _managers[:] = [m for m in _managers if plugin_name not in m.available_plugins]
@@ -214,12 +209,35 @@ class PluginManger:
             for mod in to_delete:
                 del sys.modules[mod]
 
+            await plugin.delete()
 
             # 清理缓存
             importlib.invalidate_caches()
 
             await cls.get_noload_plugins()
             return "SUCCESS"
+        except Exception:
+            return "ERROR"
+
+    @classmethod
+    async def plugin_reload(cls, plugin: PluginInfo)->str:
+
+        plugin_name = plugin.module
+        if plugin_name not in _plugins:
+            return "NOT_FOUND"
+
+        try:
+            unload_result = await cls.plugin_unload(plugin)
+
+            if unload_result != "SUCCESS":
+                return "UNLOAD_ERROR"
+
+            load_result = await cls.plugin_load(plugin.module_path)
+            if load_result != "SUCCESS":
+                return "LOAD_ERROR"
+
+            return "SUCCESS"
+
         except Exception:
             return "ERROR"
 
