@@ -168,7 +168,8 @@ class PluginManger:
             await cls.get_noload_plugins()
 
             return "SUCCESS"
-        except Exception:
+        except Exception as e:
+            print(e)
             return "LOAD_ERROR"
 
     @classmethod
@@ -184,6 +185,10 @@ class PluginManger:
         plugin_name = plugin.module
         if plugin_name not in _plugins:
             return "NOT_FOUND"
+
+        for m in _managers:
+            print(m)
+
 
         if not any(plugin_name in m.available_plugins for m in _managers):
             return "NOT_MANAGED"
@@ -201,7 +206,9 @@ class PluginManger:
 
             # 删除插件记录
             del _plugins[plugin_name]
-            _managers[:] = [m for m in _managers if plugin_name not in m.available_plugins]
+            for m in _managers:
+                m._third_party_plugin_ids.pop(plugin_name, None)
+                m._searched_plugin_ids.pop(plugin_name, None)
 
 
             # 删除 sys.modules 中插件模块及其子模块
@@ -215,6 +222,10 @@ class PluginManger:
             importlib.invalidate_caches()
 
             await cls.get_noload_plugins()
+            print("==================================")
+            for m in _managers:
+                print(m)
+
             return "SUCCESS"
         except Exception:
             return "ERROR"

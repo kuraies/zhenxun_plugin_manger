@@ -97,11 +97,9 @@ async def plugin_load_handle(args:CommandResult):
 
     plugin_path = await PluginManger.find_noload_plugin(_value, _type)
 
-
     if plugin_path is None:
         await UniMessage(f"未找到插件或插件已加载").send(reply_to=True)
         return
-
 
     result = await PluginManger.plugin_load(plugin_path)
     if result=="SUCCESS":
@@ -143,8 +141,10 @@ async def plugin_unload_handle(args: CommandResult):
         await UniMessage(f"插件 {plugin.name} 已成功卸载").send(reply_to=True)
     elif result == "ERROR":
         await UniMessage(f"插件 {plugin.name} 卸载时发生错误").send(reply_to=True)
-    else:
+    elif result=="NOT_FOUND":
         await UniMessage(f"插件 {plugin.name} 未找到").send(reply_to=True)
+    else:
+        await UniMessage(f"插件 {plugin.name} 查找时异常").send(reply_to=True)
 
 
 
