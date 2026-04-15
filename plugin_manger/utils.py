@@ -1,6 +1,7 @@
 import ast
-import importlib
-import sys
+import asyncio
+import inspect
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Any, Dict, Callable
@@ -17,6 +18,9 @@ from zhenxun.utils.enum import (
     PluginType,
 )
 from zhenxun.utils.message import MessageUtils
+
+from nonebot_plugin_apscheduler import scheduler
+
 
 
 @dataclass(frozen=True)
@@ -186,14 +190,21 @@ class PluginManger:
         if plugin_name not in _plugins:
             return "NOT_FOUND"
 
-        for m in _managers:
-            print(m)
 
 
         if not any(plugin_name in m.available_plugins for m in _managers):
             return "NOT_MANAGED"
 
         try:
+
+            sc_num = await PluginSchedulerManger.remove_jobs(plugin.module_path)
+            print(f"杀死了{sc_num}个定时任务 ")
+
+            task_num =  await PluginTaskManger.cancel_tasks(plugin.module_path)
+            print(f"杀死了{task_num}个任务 ")
+
+
+
             module_name = _plugins[plugin_name].module_name
 
             # 清除 matchers
@@ -222,12 +233,11 @@ class PluginManger:
             importlib.invalidate_caches()
 
             await cls.get_noload_plugins()
-            print("==================================")
-            for m in _managers:
-                print(m)
 
             return "SUCCESS"
-        except Exception:
+        except Exception as e:
+
+            print(e)
             return "ERROR"
 
     @classmethod
@@ -256,6 +266,17 @@ class PluginManger:
     @classmethod
     async def plugin_noload_list(cls):
         _plugin_list = await cls.get_noload_plugins()
+
+        all_tasks = asyncio.all_tasks()
+
+        for task in all_tasks:
+            print(f"  - {task.get_name()}: {task}")
+
+        sc= scheduler.get_jobs()
+        for job in scheduler.get_jobs():
+            func = getattr(job, "func", None)
+            module = getattr(func, "__module__", None)
+            print(module)
 
         if not _plugin_list:
             await MessageUtils.build_message("没有未加载的插件").finish(reply_to=True)
@@ -416,3 +437,111 @@ def get_target_plugin(all_args: dict) -> tuple[str | None, str]:
             return str(plugin_path), "path"
 
     return None, ""
+
+class PluginTaskManger:
+    """
+    基于模块前缀强制回收 asyncio Task（类方法版）
+    """
+
+    # -------------------------
+    # 内部：task 归属判断
+    # -------------------------
+
+    @classmethod
+    def _belongs_to_module(cls, task: asyncio.Task, module_prefix: str) -> bool:
+        coro = task.get_coro()
+
+        while coro:
+            try:
+                module = inspect.getmodule(coro)
+                if module and module.__name__.startswith(module_prefix):
+                    return True
+            except Exception:
+                pass
+
+            coro = getattr(coro, "cr_await", None)
+
+        return False
+
+    # -------------------------
+    # 内部：查找 task
+    # -------------------------
+
+    @classmethod
+    def _find_tasks(cls, module_prefix: str) -> List[asyncio.Task]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return []
+
+        current = asyncio.current_task(loop=loop)
+
+        tasks: List[asyncio.Task] = []
+        for task in asyncio.all_tasks(loop):
+            if task is current:
+                continue
+            if task.done():
+                continue
+            if cls._belongs_to_module(task, module_prefix):
+                tasks.append(task)
+
+        return tasks
+
+    # -------------------------
+    # 对外：取消 task
+    # -------------------------
+
+    @classmethod
+    async def cancel_tasks(
+        cls,
+        module_prefix: str,
+        *,
+        timeout: float | None = 5,
+        raise_on_timeout: bool = False,
+    ) -> int:
+        """
+        取消指定模块前缀下的所有 asyncio task
+
+        :return: 实际取消的 task 数量
+        """
+        tasks = cls._find_tasks(module_prefix)
+        if not tasks:
+            return 0
+
+        for task in tasks:
+            task.cancel()
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            if raise_on_timeout:
+                raise
+
+        return len(tasks)
+
+class PluginSchedulerManger:
+    """
+    基于模块前缀清理 APScheduler job
+    """
+
+    @classmethod
+    def remove_jobs(cls, module_prefix: str) -> int:
+        """
+        移除指定插件模块下的所有 scheduler job
+
+        :return: 实际移除的 job 数量
+        """
+        removed = 0
+
+        for job in scheduler.get_jobs():
+            func = getattr(job, "func", None)
+            module = getattr(func, "__module__", None)
+
+            if module and module.startswith(module_prefix):
+                scheduler.remove_job(job.id)
+                removed += 1
+
+        return removed
